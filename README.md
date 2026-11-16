@@ -1,55 +1,69 @@
-# Mintlify Starter Kit
+# Work Louder Docs
 
-Use the starter kit to get your docs deployed and ready to customize.
+Developer documentation for Work Louder devices and the Input app, built with [Mintlify](https://mintlify.com).
 
-Click the green **Use this template** button at the top of this repo to copy the Mintlify starter kit. The starter kit contains examples with
+## Contents
 
-- Guide pages
-- Navigation
-- Customizations
-- API reference pages
-- Use of popular components
+| Page                                      | Description                                        |
+| ----------------------------------------- | -------------------------------------------------- |
+| [WebSocket API](websocket/user-guide.mdx) | Control your device from your own scripts and apps |
 
-**[Follow the full quickstart guide](https://starter.mintlify.com/quickstart)**
+## Project structure
 
-## AI-assisted writing
+```
+docs.json                  Site configuration: name, colors, logo and navigation
+websocket/user-guide.mdx   WebSocket API guide
+logo/                      Light and dark mode logos
+favicon.png                Browser tab icon
+```
 
-Set up your AI coding tool to work with Mintlify:
+Pages are MDX files (Markdown with components) with a YAML header that sets the
+page `title` and `description`.
+
+## Adding a page
+
+1. Create an `.mdx` file with a header:
+
+    ```mdx
+    ---
+    title: "Page title"
+    description: "One-line summary"
+    ---
+    ```
+
+2. Add its path, without the extension, to `navigation` in `docs.json`. Pages that
+   are not listed there do not appear in the sidebar.
+
+See the [Mintlify components](https://mintlify.com/docs/components) for callouts,
+steps, tabs, cards and more.
+
+## Local preview
+
+Run the following from the repository root:
 
 ```bash
-npx skills add https://mintlify.com/docs
+npx mint dev
 ```
 
-This command installs Mintlify's documentation skill for your configured AI tools like Claude Code, Cursor, Windsurf, and others. The skill includes component reference, writing standards, and workflow guidance.
+The site opens at `http://localhost:3000`.
 
-See the guides for [Claude Code](https://www.mintlify.com/docs/guides/claude-code), [Codex](https://www.mintlify.com/docs/guides/codex), [Cursor](https://www.mintlify.com/docs/guides/cursor), and [Devin Desktop](https://www.mintlify.com/docs/guides/devin-desktop) for tool-specific setup.
+## Checks
 
-## Development
+Run both before opening a pull request:
 
-Install the [Mintlify CLI](https://www.npmjs.com/package/mint) to preview your documentation changes locally. To install, use the following command:
-
-```
-npm i -g mint
-```
-
-Run the following command at the root of your documentation, where your `docs.json` is located:
-
-```
-mint dev
+```bash
+npx mint validate
+npx mint broken-links --check-anchors
 ```
 
-View your local preview at `http://localhost:3000`.
+## Publishing
 
-## Publishing changes
+The site deploys automatically when changes are merged into `main` through the
+Mintlify GitHub app. Open a pull request from a branch rather than pushing to
+`main` directly.
 
-Install our GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app) to propagate changes from your repo to your deployment. Changes are deployed to production automatically after pushing to the default branch.
+## Troubleshooting
 
-## Need help?
-
-### Troubleshooting
-
-- If your dev environment isn't running: Run `mint update` to ensure you have the most recent version of the CLI.
-- If a page loads as a 404: Make sure you are running in a folder with a valid `docs.json`.
-
-### Resources
-- [Mintlify documentation](https://mintlify.com/docs)
+- If the preview does not start, run `npx mint@latest dev` to use the latest CLI.
+- If a page returns 404, check that it is listed in `docs.json` and that you are
+  running the command from the folder that contains `docs.json`.
