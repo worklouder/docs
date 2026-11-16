@@ -1,0 +1,934 @@
+---
+title: "WebSocket API"
+description: "Control your Work Louder device from your own scripts and apps"
+---
+
+Input includes a local WebSocket API that lets your own scripts and apps talk to your
+Work Louder device while Input is running. With it you can:
+
+- **react to key presses**: run your own code when you press a key on the device
+- **change key lighting**: set the color, brightness and effect of specific keys
+- **switch profiles and layers**
+- **install new layers**, including their Actions, Multiactions and Smart Actions
+- **read device information**: model, firmware version, battery and the active profile and layer
+
+The API only accepts connections from your own computer, and every app has to be
+approved by you in Input before it can do anything.
+
+<Note>
+  The API currently works with **Creator Micro V2 Base**, **Creator Micro V2 Pro** and **Codex Micro**.
+</Note>
+
+## 1. Build it with your AI agent
+
+You don't need to write the code yourself. Copy the prompt below into your AI coding
+agent (Claude Code, Cursor, ChatGPT, Codex, Copilot and so on), describe what you want
+under **What I want to build**, and let the agent write the integration for you.
+
+You don't need to set anything up on the device. If your integration needs its own
+keys, the agent creates a new layer with them and installs it for you.
+
+Before you run what the agent builds:
+
+1. Make sure Input is open and your device is connected.
+2. The first time the integration runs, Input asks you to approve it. Approve it within
+   30 seconds.
+
+### Prompt
+
+````text
+You are helping me build an integration with Work Louder Input, a desktop app that
+manages my Work Louder macropad. Input exposes a local WebSocket API. Build the
+integration described under "What I want to build" using the reference below. Ask me
+before guessing anything that isn't covered here.
+
+## What I want to build
+
+<Describe what you want in your own words. For example: "Give me a key that runs
+`npm run deploy` in ~/projects/site. Light it red while it runs and green when it
+succeeds.">
+
+## Preferred stack
+
+<Optional, e.g. "Node.js script", "Python", "Electron app", "Raycast extension".
+Delete this section to let the agent choose.>
+
+## Setting up the keys
+
+Assume my device has no keys for this integration yet, and create them yourself:
+
+- Build a layer definition (format below) whose keys are bound to `API` Smart Actions,
+  one per key the integration needs, with identifiers you choose. Use a shared prefix
+  such as `deploy-` so one regex can target them all. Set every other key to `KC_NONE`.
+- Ask me to confirm before installing it. Then install it with `addLayer` on the active
+  profile (`getDeviceInfo` -> `deviceStatus.selectedProfileIndex`) unless I say otherwise. Pressing those keys then
+  sends `keyTriggered` with your identifiers, and `setKeyLighting` can light them.
+- Install the layer only once. There is no API to list, update or remove layers, so
+  every `addLayer` call adds another copy. Remember that it was installed (for example
+  next to the stored credentials) and offer an explicit command to reinstall it.
+- The new layer is always added as the profile's last layer, but no API reports its
+  index. To switch to it, call `setActiveProfileLayer` on that profile with
+  `layerIndex` 6, then 5 and so on: layers that don't exist fail with `-32015`, and the
+  first call that succeeds has selected the new layer.
+- If `addLayer` fails with `-32011`, the profile already has six layers. Tell me to
+  delete one in Input or to choose another profile.
+- Only if I say I already set up API Smart Actions in Input, use the identifiers I give
+  you and don't install a layer.
+
+## Reference implementations
+
+Work Louder publishes two open-source integrations that do all of this: authorization,
+credential storage, installing their own layer of API keys once, handling key events and
+lighting. If you can browse the web, read them before writing code and follow their
+patterns:
+
+- https://github.com/worklouder/claude-plugin (Claude Code plugin, Node.js ESM):
+  `src/input.mjs` for the InputKit connection, authorization, layer install and lighting;
+  `resources/claude-layer.json` for a complete layer definition with API Smart Actions
+  such as `claude.agent.1`.
+- https://github.com/worklouder/cursor-plugin (Cursor plugin, Node.js CommonJS):
+  `src/client/client.cjs` for the InputKit client with reconnects;
+  `src/helper/controller.cjs` for layer installation and key handling;
+  `src/domain/lighting.cjs` for status lighting; `src/resources/layers/cursor-default.json`
+  for the layer definition.
+
+If you can't browse, the reference below is enough on its own.
+
+## How to connect
+
+- If the project is JavaScript or TypeScript, use the official client library
+  `@worklouder/input-kit` (npm). It needs Node.js 22.4+ or any runtime with a standard
+  global `WebSocket`, has no dependencies, and handles framing, request queueing, rate
+  limits and timeouts. API:
+  - `new InputClient({ applicationName })`, then `await connect()` and `await close()`.
+  - `requestAuthorization()` resolves to `{ applicationId, token }` and shows an
+    approval dialog in Input. Call it only on the very first run.
+  - `authenticate({ applicationId, token })` on every later run.
+  - `getDevices()`, `getDeviceInfo(deviceId)`,
+    `setActiveProfileLayer({ deviceId, profileIndex, layerIndex })`,
+    `setKeyLighting({ deviceId, identifier, isRegex, color?, brightness?, effect?, speed? })`,
+    `addLayer({ deviceId, profileIndex, definition })`.
+  - Events through `on`/`once`/`off`: `devicesUpdated`, `deviceInfoChanged`,
+    `keyTriggered`, `disconnected`, `transportError`, `protocolError`, `notification`.
+    It is not a Node.js EventEmitter, so don't use `events.once()`.
+  - Errors: `InputApiError` (has numeric `code`), `InputConnectionError`,
+    `InputRequestTimeoutError`, `InputProtocolError`.
+- In any other language, speak JSON-RPC 2.0 over a plain WebSocket:
+  - URL `ws://127.0.0.1:19147/input` (or `ws://[::1]:19147/input`). The port and path
+    are fixed. Only loopback hosts are accepted.
+  - One JSON-RPC request per text frame:
+    `{"jsonrpc":"2.0","id":1,"method":"getDevices","params":{}}`.
+    No batches, no client notifications, no binary frames. `id` is an integer or a
+    string of at most 128 characters. `params` must be an object when present.
+  - Responses carry the same `id` with either `result` or
+    `error: { code, message }`. Server events are notifications without an `id`:
+    `{"jsonrpc":"2.0","method":"keyTriggered","params":{...}}`.
+  - Native clients must not send an `Origin` header. Browser pages may connect, but
+    their credentials only work from the same website origin.
+
+## Authorization (both approaches)
+
+- First run: connect, then call `requestAuthorization` with
+  `{ "applicationName": "<name shown to the user, max 80 printable characters>" }`.
+  Input shows an approval dialog. On approval the result is
+  `{ applicationId, token }` and the current connection is authenticated.
+- Store `applicationId` and `token` securely, ideally in the OS keychain or credential
+  store. The token is shown only once and Input keeps only a hash of it. Never log or
+  commit it.
+- Later runs: connect, then call `authenticate` with `{ applicationId, token }`. The
+  result is `{ "authenticated": true }`.
+- A connection must authenticate within 30 seconds of opening, including the time the
+  user spends on the approval dialog, or Input closes it.
+- If `authenticate` fails with `-32001`, the app was revoked: delete the stored
+  credentials and run the first-run flow again.
+
+## Methods (all need an authenticated connection)
+
+- `getDevices` -> `[{ id, deviceType }]`. `id` is a runtime ID that can change when
+  the device reconnects, so look it up again after reconnecting and on
+  `devicesUpdated`. `deviceType` is `creator_micro_v2_base`, `creator_micro_v2_pro` or
+  `codex_micro`.
+- `getDeviceInfo { deviceId }` -> `{ portPath, devicePid, serialNumber?,
+  connectionType, deviceType, layoutType, isUsbConnection, deviceStatus?:
+  { firmwareVersion?, selectedProfileIndex? (0-based), selectedLayerIndex? (1-based),
+  batteryPercentage?, isCharging? } }`.
+- `setActiveProfileLayer { deviceId, profileIndex (0-based), layerIndex (1-based) }`
+  -> `{ changed: true }`.
+- `setKeyLighting { deviceId, identifier, isRegex, color?, brightness?, effect?,
+  speed? }` -> `{ applied: true }`. Targets API Smart Actions by identifier.
+  `color` is an integer 0xRRGGBB (0 to 16777215), `brightness` 0 to 1, `speed` 0 to 1,
+  `effect` 0 off, 1 solid, 3 rainbow, 4 breath, 6 shallow breath. At least one lighting
+  field is required. Matching is case-sensitive. With `isRegex: true` the pattern must
+  match the WHOLE identifier (`vol.*` matches `volume-up`; `vol` matches only `vol`).
+  Patterns use RE2 syntax, so no backreferences or lookarounds. Exact identifiers are
+  at most 128 characters and patterns at most 256.
+- `addLayer { deviceId, profileIndex (0-based), definition }` -> `{ added: true }`.
+  Adds a new layer to an existing profile. A profile holds at most 6 layers. The
+  definition format is described below. It doesn't change the active layer; call
+  `setActiveProfileLayer` afterwards if needed.
+
+## Events (every authenticated client receives all of them; no subscription needed)
+
+- `keyTriggered { deviceId, identifier, action }`: a key bound to an API Smart Action
+  was used. `action` is `press`, `release` or `click`.
+- `deviceInfoChanged { deviceId, deviceInfo }`: a full replacement snapshot, sent
+  when the active profile or layer changes.
+- `devicesUpdated { devices }`: the full list of ready devices changed.
+
+## Layer definition for addLayer
+
+```json
+{
+  "id": 1, "name": "My layer", "os": [0], "keyboardLayoutTypes": ["universal"],
+  "devices": ["creator_micro_v2_pro"],
+  "layer": { "id": 0, "name": "My layer", "color": "#FF0000", "os": 0,
+             "layout": { "base": [[...],[...],[...],[...]], "encoders": [[...]],
+                         "joystick": { "type": "RADIAL", "sectors": [] } } },
+  "actions": [], "multiactions": [], "smartActions": [],
+  "actionGroups": [], "multiactionGroups": [], "smartActionGroups": []
+}
+```
+
+- `os` and `layer.os`: 0 = macOS, 1 = Windows.
+- Each key is `{ "keycode": "..." }`. The layout must have exactly the device's shape.
+  For Creator Micro V2 and Codex Micro that is 4 `base` rows of 2, 4, 4 and 3 keys,
+  1 `encoders` row of 3 entries (counter-clockwise, clockwise, press) and a `joystick`
+  object. Each joystick sector is `{ "k": keycode, "a1": start, "a2": end }`.
+- Keycodes: `KC_NONE` (empty), standard keys such as `KC_A`, `KC_ENT` or `KC_LGUI`,
+  or references to entries in the same definition: `KA_<actionId>`,
+  `KM_<multiactionId>` or `SA_<smartActionId>`. Unknown keycodes are rejected. The
+  safest source of valid keycodes is a layer exported from Input.
+- Action: `{ "id", "name", "color"?, "icon"?, "keyInputs": [{ "keycode", "delay" (ms),
+  "actionType" (0 release, 1 press, 2 click) }] }`.
+- Multiaction: `{ "id", "name", "tap", "onHold", "doubleTap", "tapHold",
+  "tappingTerms" (ms) }`, where each slot is a key input as above.
+- Smart Action: `{ "id", "name", "type", "payload" }`. The types are `TEXT_STEP`
+  (`{ "text" }`), `URL_STEP` (`{ "url" }`), `APP_STEP` (`{ "name", "path" }`) and `API`
+  (`{ "id": "<identifier>" }`). `CMD_STEP` is rejected.
+- Groups: `{ "id", "name", "actionIds": [...] }`, which may only list IDs defined in
+  the same definition.
+- IDs only need to be unique inside the definition. Input renumbers them and reuses
+  identical existing entries.
+
+## Limits
+
+- 5 open connections, 30 requests per 10 seconds per connection, 512 KiB per message.
+  Going over closes the connection, so send one request at a time.
+- 3 authorization requests per minute, and only one approval dialog at a time.
+
+## Error codes
+
+-32700 invalid JSON; -32600 invalid request; -32601 unknown method; -32602 invalid
+params, layer definition or regex; -32603 internal error; -32001 authentication
+required or failed; -32002 authorization in progress or unavailable; -32003
+authorization denied; -32004 device not found; -32005 device disconnected; -32006
+device model unsupported; -32007 lighting unavailable; -32008 device not ready; -32009
+identifier not found; -32010 profile not found; -32011 layer limit reached; -32013
+configuration write failed; -32014 another configuration write in progress; -32015
+layer not found; -32016 device rejected the profile/layer change.
+
+## Requirements for your code
+
+- Handle Input not running (connection refused) with a clear message and a retry with
+  backoff. Never hammer the port.
+- Reconnect after disconnects, re-authenticate with the stored credentials and fetch
+  the device list again.
+- Wait for responses instead of firing many requests at once.
+- Keep the token out of logs, source control and plain-text files where possible.
+- Explain to me how to run the result, what to approve in Input on the first run, and
+  which layer you installed.
+````
+
+---
+
+## 2. Before you start
+
+- **Input** must be running. The API starts with Input; there's no setting to turn on.
+- A **supported device** (Creator Micro V2 Base, Creator Micro V2 Pro or Codex Micro)
+  must be connected, and Input must have finished loading its configuration. Until
+  then the device doesn't appear in `getDevices`, and requests for it fail with
+  `-32008 Device not ready`.
+- For **InputKit**: Node.js 22.4 or later, or another runtime with a standard global
+  `WebSocket` (Deno, Bun, browsers).
+- For **any other language**: a WebSocket client library, for example `websockets`
+  for Python or `gorilla/websocket` for Go.
+
+---
+
+## 3. Key concepts
+
+### Devices
+
+`getDevices` lists the devices that are ready to use. Each has a numeric `id` that is
+only valid while it stays connected. After the device reconnects or Input restarts, it
+can get a different ID. Look IDs up again after reconnecting, and keep your list in
+sync with the `devicesUpdated` event.
+
+### Profiles and layers
+
+A device has several **profiles**, and each profile has up to **six layers**.
+
+- **Profile indexes start at 0**: the first profile is `0`.
+- **Layer indexes start at 1**: the first layer of a profile is `1`.
+
+`getDeviceInfo` reports the active selection in `deviceStatus.selectedProfileIndex` and
+`deviceStatus.selectedLayerIndex`. When it changes, whether from your code or from the
+device itself, every client receives `deviceInfoChanged`.
+
+### API Smart Actions
+
+An **API Smart Action** is a Smart Action whose only job is to tell external apps that a
+key was used. It's what connects a physical key to your code:
+
+- When you use a key bound to an API Smart Action, every connected app receives a
+  `keyTriggered` event with that Smart Action's **identifier**.
+- `setKeyLighting` uses the same identifiers to choose which keys to light up.
+
+There are two ways to get them onto your device:
+
+- **From code (what the AI prompt does):** the integration installs a new layer whose
+  keys are bound to API Smart Actions, using `addLayer` (see
+  [section 6](#6-layer-definitions-for-addlayer)). Nothing to set up by hand, but the
+  keys live on their own layer, and a profile holds at most six layers.
+- **By hand in Input:** use this to put an API key on a layer you already have, because
+  the API can add layers but can't change existing ones.
+    1. Open the **Smart Actions** panel and create a new Smart Action.
+    2. Choose the **API** tab and give it an identifier, such as `deploy`, `mute-mic` or
+       `volume-up`. Identifiers are case-sensitive and can be up to 128 characters, with
+       no leading or trailing spaces.
+    3. Save it and assign it to a key, like any other Smart Action.
+
+> **Tip:** a consistent naming scheme makes lighting easier. For example, with
+> `obs-scene-1`, `obs-scene-2` and so on, the regex `obs-scene-.*` lights them all at once.
+
+---
+
+## 4. Using InputKit (JavaScript and TypeScript)
+
+[`@worklouder/input-kit`](https://www.npmjs.com/package/@worklouder/input-kit) is the
+official client library. It has no dependencies, ships ESM and CommonJS builds with
+TypeScript types, and takes care of the protocol details for you: request IDs,
+spacing requests to stay under the rate limit, size checks, timeouts and typed errors.
+
+```sh
+npm install @worklouder/input-kit
+# or
+yarn add @worklouder/input-kit
+```
+
+### First run and later runs
+
+```ts
+import { InputClient, InputApiError } from '@worklouder/input-kit';
+
+const input = new InputClient({ applicationName: 'Deploy Button' });
+await input.connect();
+
+const saved = await loadCredentials(); // your own secure storage
+if (saved) {
+    try {
+        await input.authenticate(saved);
+    } catch (error) {
+        if (error instanceof InputApiError && error.code === -32001) {
+            // The app was revoked in Input. Forget the credentials and ask again.
+            await deleteCredentials();
+        }
+        throw error;
+    }
+} else {
+    // Shows an approval dialog in Input. Approve it within 30 seconds.
+    const credentials = await input.requestAuthorization();
+    await saveCredentials(credentials);
+}
+```
+
+`requestAuthorization` returns the token **only once**. Store it in the operating
+system's credential store (Keychain on macOS, Credential Manager on Windows), for
+example with a package such as `keytar`. A plain JSON file is fine for experiments, but
+not for something you share.
+
+### React to a key press and light it up
+
+```ts
+const [device] = await input.getDevices();
+if (!device) {
+    throw new Error('Connect a supported device and wait for Input to load it.');
+}
+
+input.on('keyTriggered', async ({ deviceId, identifier, action }) => {
+    if (identifier !== 'deploy' || action === 'release') {
+        return;
+    }
+    await input.setKeyLighting({
+        deviceId,
+        identifier,
+        isRegex: false,
+        color: 0xff0000,
+        effect: 4,
+    });
+    const ok = await runDeploy();
+    await input.setKeyLighting({
+        deviceId,
+        identifier,
+        isRegex: false,
+        color: ok ? 0x00ff00 : 0xff0000,
+        effect: 1,
+    });
+});
+```
+
+### Switch profile and layer
+
+```ts
+// Second profile (index 1), third layer (index 3).
+await input.setActiveProfileLayer({ deviceId: device.id, profileIndex: 1, layerIndex: 3 });
+
+input.on('deviceInfoChanged', ({ deviceId, deviceInfo }) => {
+    const { selectedProfileIndex, selectedLayerIndex } = deviceInfo.deviceStatus ?? {};
+    console.log(
+        `Device ${deviceId} is on profile ${selectedProfileIndex}, layer ${selectedLayerIndex}`,
+    );
+});
+```
+
+### Good to know
+
+- **Requests are queued.** InputKit sends one request at a time, at least 400 ms apart,
+  so you can `await` calls freely without hitting the rate limit.
+- **Timeouts:** 10 seconds for most requests, 120 seconds for `addLayer` and 29 seconds
+  for `requestAuthorization`. A timed-out request may still have succeeded, and
+  InputKit never retries on its own.
+- **Disconnects:** listen for `disconnected`, then call `connect()` and `authenticate()`
+  again and refresh your device list. Add a growing delay between attempts.
+- **Events:** `on`, `once` and `off` work as usual, but `InputClient` is not a Node.js
+  `EventEmitter`. Use `input.once(...)` wrapped in a promise rather than
+  `events.once()`.
+- **Browser apps** send the page's origin, and Input ties credentials to it. A browser
+  app needs its own approval, and credentials from a Node.js script won't work there.
+
+The complete InputKit reference is in the package's `docs/API.md`, and
+`examples/cli.mjs` is a runnable demo.
+
+### Example projects
+
+Two open-source Work Louder integrations show a complete InputKit integration. They're
+good starting points, and the prompt in section 1 points AI agents to them too.
+
+| Project                                                                 | What it shows                                                                                                                                                                   |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [worklouder/claude-plugin](https://github.com/worklouder/claude-plugin) | A Claude Code plugin in Node.js (ESM). `src/input.mjs` handles connection, authorization, layer install and lighting. `resources/claude-layer.json` is a full layer definition. |
+| [worklouder/cursor-plugin](https://github.com/worklouder/cursor-plugin) | A Cursor plugin in Node.js (CommonJS). See `src/client/client.cjs`, `src/helper/controller.cjs`, `src/domain/lighting.cjs` and `src/resources/layers/cursor-default.json`.      |
+
+Both follow the pattern recommended in this guide:
+
+1. On first run, they ask Input for authorization and store the credentials.
+2. They offer to add their own layer, whose keys are bound to API Smart Actions with
+   identifiers like `claude.agent.1`, and install it once after the user confirms.
+3. They react to `keyTriggered` events and use `setKeyLighting` to show status on those
+   keys.
+
+---
+
+## 5. Protocol reference (any language)
+
+Use this section if you're not using JavaScript, or want to understand what InputKit
+does for you.
+
+### Connecting
+
+| Item        | Value                                                        |
+| ----------- | ------------------------------------------------------------ |
+| URL         | `ws://127.0.0.1:19147/input` or `ws://[::1]:19147/input`     |
+| `Host`      | `127.0.0.1:19147`, `[::1]:19147` or `localhost:19147`        |
+| `Origin`    | Leave it out in native apps. Browsers send it automatically. |
+| Frames      | Text only, one JSON-RPC message per frame                    |
+| Compression | Not supported; Input declines `permessage-deflate`           |
+
+Input rejects the connection if the path or host is wrong, if the `Origin` is not a
+plain `http://` or `https://` origin, or if five clients are already connected.
+
+### Message format
+
+Every request is a JSON-RPC 2.0 object:
+
+```json
+{ "jsonrpc": "2.0", "id": 1, "method": "getDevices", "params": {} }
+```
+
+- `id` must be an integer or a string of at most 128 characters. Responses echo it.
+- `params` must be an object when present.
+- Batches (arrays) and notifications (requests without `id`) are not supported.
+
+A response contains either `result` or `error`:
+
+```json
+{ "jsonrpc": "2.0", "id": 1, "result": [{ "id": 1, "deviceType": "codex_micro" }] }
+```
+
+```json
+{ "jsonrpc": "2.0", "id": 1, "error": { "code": -32004, "message": "Device not found" } }
+```
+
+Events from Input are notifications without an `id`:
+
+```json
+{
+    "jsonrpc": "2.0",
+    "method": "keyTriggered",
+    "params": { "deviceId": 1, "identifier": "deploy", "action": "press" }
+}
+```
+
+### Authorization flow
+
+Before authenticating, only `requestAuthorization` and `authenticate` are accepted.
+Anything else returns `-32001`. A connection that hasn't authenticated **within 30
+seconds** is closed, and that includes the time the user spends on the approval dialog.
+
+**First run:**
+
+```json
+{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "requestAuthorization",
+    "params": { "applicationName": "Deploy Button" }
+}
+```
+
+Input shows an approval dialog with your app's name. For connections from a browser, it
+also shows the website's origin and a warning. If the user approves:
+
+```json
+{ "jsonrpc": "2.0", "id": 1, "result": { "applicationId": "…", "token": "…" } }
+```
+
+The connection is now authenticated. Store both values securely; the token can't be
+retrieved again. If the user declines, you get `-32003`.
+
+`applicationName` must be 1 to 80 printable characters after trimming, with no control
+or invisible formatting characters.
+
+**Later runs:**
+
+```json
+{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "authenticate",
+    "params": { "applicationId": "…", "token": "…" }
+}
+```
+
+The result is `{ "authenticated": true }`. Wrong or revoked credentials return
+`-32001`, and Input closes the connection.
+
+Credentials are tied to the connection origin. A native app (no `Origin`) and a website
+each need their own approval.
+
+### Methods
+
+#### `getDevices`
+
+Lists ready devices.
+
+- **Params:** none, or `{}`
+- **Result:** `Array<{ id: number, deviceType: string }>`
+
+`deviceType` is `creator_micro_v2_base`, `creator_micro_v2_pro` or `codex_micro`.
+
+#### `getDeviceInfo`
+
+Returns Input's latest information about a device without querying the device again.
+
+- **Params:** `{ deviceId: number }`
+- **Result:**
+
+```ts
+{
+    portPath: string;
+    devicePid: string;
+    serialNumber?: string;
+    connectionType: number;
+    deviceType: string;
+    layoutType: string;          // "ansi", "iso", "universal" or "unknown"
+    isUsbConnection: boolean;
+    deviceStatus?: {
+        firmwareVersion?: string;
+        selectedProfileIndex?: number; // starts at 0
+        selectedLayerIndex?: number;   // starts at 1
+        batteryPercentage?: number;    // 0–100
+        isCharging?: boolean;
+    };
+}
+```
+
+#### `setActiveProfileLayer`
+
+Switches profile and layer in one step.
+
+- **Params:** `{ deviceId: number, profileIndex: number, layerIndex: number }`.
+  `profileIndex` starts at 0 and `layerIndex` starts at 1.
+- **Result:** `{ changed: true }`
+- **Errors:** `-32010` profile not found, `-32015` layer not found, `-32016` the device
+  rejected the change.
+
+The `deviceInfoChanged` event that follows is the authoritative confirmation.
+
+```json
+{
+    "jsonrpc": "2.0",
+    "id": 5,
+    "method": "setActiveProfileLayer",
+    "params": { "deviceId": 1, "profileIndex": 0, "layerIndex": 2 }
+}
+```
+
+#### `setKeyLighting`
+
+Changes the lighting of keys bound to API Smart Actions.
+
+| Param        | Type    | Description                                                               |
+| ------------ | ------- | ------------------------------------------------------------------------- |
+| `deviceId`   | number  | Device ID from `getDevices`                                               |
+| `identifier` | string  | An exact identifier, or a pattern when `isRegex` is `true`                |
+| `isRegex`    | boolean | Whether `identifier` is a regular expression                              |
+| `color`      | number  | Optional. RGB as an integer, `0x000000` to `0xFFFFFF`                     |
+| `brightness` | number  | Optional. `0` to `1`                                                      |
+| `effect`     | number  | Optional. `0` off, `1` solid, `3` rainbow, `4` breath, `6` shallow breath |
+| `speed`      | number  | Optional. Effect speed, `0` to `1`                                        |
+
+At least one of `color`, `brightness`, `effect` or `speed` is required. The result is
+`{ applied: true }`.
+
+Matching rules:
+
+- Matching is case-sensitive.
+- Exact identifiers are at most 128 characters.
+- Regex patterns are at most 256 characters, use [RE2 syntax](https://github.com/google/re2/wiki/Syntax)
+  (no backreferences or lookarounds) and must match the **entire** identifier. For
+  example, `vol.*` matches `volume-up` and `volume-down`, while `vol` matches only an
+  identifier that is exactly `vol`.
+- If nothing matches, the request fails with `-32009`.
+
+Success means the device accepted the change. You'll only see it if the key is on the
+active layer.
+
+```json
+{
+    "jsonrpc": "2.0",
+    "id": 6,
+    "method": "setKeyLighting",
+    "params": {
+        "deviceId": 1,
+        "identifier": "obs-scene-.*",
+        "isRegex": true,
+        "color": 3355647,
+        "brightness": 0.8,
+        "effect": 1
+    }
+}
+```
+
+(`3355647` is `0x3333FF`. JSON has no hexadecimal numbers.)
+
+#### `addLayer`
+
+Adds a new layer, together with the Actions, Multiactions and Smart Actions it uses, to
+an existing profile.
+
+- **Params:** `{ deviceId: number, profileIndex: number, definition: LayerDefinition }`.
+  `profileIndex` starts at 0.
+- **Result:** `{ added: true }`
+
+The new layer becomes the profile's last layer. The active layer doesn't change; call
+`setActiveProfileLayer` to switch to it. Input saves the change to the device and checks
+it, which can take a while, so allow up to about two minutes.
+
+Common errors:
+
+| Code     | Cause                                                                                                                                                       |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-32602` | The definition is malformed, doesn't match the device's layout, uses unknown keycodes, has groups listing undefined IDs, or contains a command Smart Action |
+| `-32010` | The profile doesn't exist                                                                                                                                   |
+| `-32011` | The profile already has six layers                                                                                                                          |
+| `-32013` | Saving to the device failed                                                                                                                                 |
+| `-32014` | Another configuration change for this device is in progress                                                                                                 |
+
+The definition format is described in [section 6](#6-layer-definitions-for-addlayer).
+
+### Events
+
+Every authenticated connection receives every event; there's nothing to subscribe to.
+Filter by `deviceId` if you only care about one device.
+
+| Event               | Params                                   | When                                                                                  |
+| ------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------- |
+| `keyTriggered`      | `{ deviceId, identifier, action }`       | A key bound to an API Smart Action is used. `action` is `press`, `release` or `click` |
+| `deviceInfoChanged` | `{ deviceId, deviceInfo }`               | The active profile or layer changed. `deviceInfo` replaces your copy in full          |
+| `devicesUpdated`    | `{ devices: Array<{ id, deviceType }> }` | A device became ready or went away. This is the full list                             |
+
+Battery changes aren't sent as events yet. Call `getDeviceInfo` when you need the
+current level.
+
+### Limits
+
+| Limit                  | Value                            | What happens when exceeded   |
+| ---------------------- | -------------------------------- | ---------------------------- |
+| Open connections       | 5                                | New connections are rejected |
+| Requests               | 30 per 10 seconds per connection | Connection closed (`1008`)   |
+| Message size           | 512 KiB                          | Connection closed (`1009`)   |
+| Time to authenticate   | 30 seconds after connecting      | Connection closed (`1008`)   |
+| Authorization requests | 3 per minute, across all apps    | `-32002`                     |
+| Approval dialogs       | One at a time                    | `-32002`                     |
+
+### Error codes
+
+| Code     | Meaning                                                     |
+| -------- | ----------------------------------------------------------- |
+| `-32700` | The message is not valid JSON                               |
+| `-32600` | Not a valid JSON-RPC request, or wrong authentication state |
+| `-32601` | Unknown method                                              |
+| `-32602` | Invalid parameters, layer definition or regex               |
+| `-32603` | Internal error in Input                                     |
+| `-32001` | Authentication required, or the credentials are invalid     |
+| `-32002` | An authorization is in progress or temporarily unavailable  |
+| `-32003` | The user declined the authorization                         |
+| `-32004` | Device not found; its ID may have changed                   |
+| `-32005` | The device disconnected                                     |
+| `-32006` | This device model doesn't support the API                   |
+| `-32007` | Lighting is unavailable on the device                       |
+| `-32008` | The device isn't ready yet                                  |
+| `-32009` | No API Smart Action matches the identifier                  |
+| `-32010` | Profile not found                                           |
+| `-32011` | The profile already has six layers                          |
+| `-32013` | The configuration couldn't be saved or verified             |
+| `-32014` | Another configuration change for the device is in progress  |
+| `-32015` | Layer not found                                             |
+| `-32016` | The device rejected the profile and layer change            |
+
+### WebSocket close codes
+
+| Code   | Reason                                                                                  |
+| ------ | --------------------------------------------------------------------------------------- |
+| `1003` | A binary frame was sent                                                                 |
+| `1008` | Authentication failed or timed out, the rate limit was exceeded, or the app was revoked |
+| `1009` | The message was too large                                                               |
+
+---
+
+## 6. Layer definitions for `addLayer`
+
+A layer definition is a JSON object with the layer's keys and everything those keys
+refer to. It's the same format Input uses for its built-in layer presets.
+
+### Start from an exported layer
+
+The easiest way to get a valid layout and valid keycodes is to build the layer in Input
+first and export it: open the layer's menu and choose **Export layer**. The exported
+file contains `layer`, `actions`, `multiactions`, `smartActions` and the group lists.
+Add the top-level `id`, `name`, `os`, `keyboardLayoutTypes` and `devices` fields
+described below, and you have a definition.
+
+### Structure
+
+```json
+{
+    "id": 1,
+    "name": "Deploy tools",
+    "description": "Optional",
+    "author": "Optional",
+    "tags": ["optional"],
+    "os": [0],
+    "keyboardLayoutTypes": ["universal"],
+    "devices": ["creator_micro_v2_pro"],
+    "layer": {
+        "id": 0,
+        "name": "Deploy tools",
+        "color": "#22AAFF",
+        "os": 0,
+        "layout": {
+            "base": [
+                [{ "keycode": "SA_1" }, { "keycode": "SA_2" }],
+                [
+                    { "keycode": "KA_1" },
+                    { "keycode": "KC_NONE" },
+                    { "keycode": "KC_NONE" },
+                    { "keycode": "KC_NONE" }
+                ],
+                [
+                    { "keycode": "KC_NONE" },
+                    { "keycode": "KC_NONE" },
+                    { "keycode": "KC_NONE" },
+                    { "keycode": "KC_NONE" }
+                ],
+                [{ "keycode": "KC_NONE" }, { "keycode": "KC_NONE" }, { "keycode": "KC_NONE" }]
+            ],
+            "encoders": [
+                [{ "keycode": "KC_NONE" }, { "keycode": "KC_NONE" }, { "keycode": "KC_NONE" }]
+            ],
+            "joystick": { "type": "RADIAL", "sectors": [] }
+        }
+    },
+    "actions": [
+        {
+            "id": 1,
+            "name": "Copy",
+            "keyInputs": [
+                { "keycode": "KC_LGUI", "delay": 0, "actionType": 1 },
+                { "keycode": "KC_C", "delay": 0, "actionType": 1 },
+                { "keycode": "KC_C", "delay": 0, "actionType": 0 },
+                { "keycode": "KC_LGUI", "delay": 0, "actionType": 0 }
+            ]
+        }
+    ],
+    "multiactions": [],
+    "smartActions": [
+        { "id": 1, "name": "Deploy", "type": "API", "payload": { "id": "deploy" } },
+        { "id": 2, "name": "Rollback", "type": "API", "payload": { "id": "rollback" } }
+    ],
+    "actionGroups": [{ "id": 1, "name": "Deploy tools", "actionIds": [1] }],
+    "multiactionGroups": [],
+    "smartActionGroups": [{ "id": 1, "name": "Deploy tools", "actionIds": [1, 2] }]
+}
+```
+
+This installs a layer whose first two keys send `keyTriggered` with the identifiers
+`deploy` and `rollback`, and whose third key presses ⌘C.
+
+### Top-level fields
+
+| Field                                                        | Required | Description                                              |
+| ------------------------------------------------------------ | -------- | -------------------------------------------------------- |
+| `id`                                                         | yes      | Any integer                                              |
+| `name`                                                       | yes      | Name of the definition                                   |
+| `os`                                                         | yes      | Operating systems it's meant for: `0` macOS, `1` Windows |
+| `keyboardLayoutTypes`                                        | yes      | Strings such as `"universal"`, `"ansi"` or `"iso"`       |
+| `devices`                                                    | yes      | Strings such as `"creator_micro_v2_pro"`                 |
+| `layer`                                                      | yes      | The layer itself (see below)                             |
+| `actions`, `multiactions`                                    | yes      | Lists, which may be empty                                |
+| `actionGroups`, `multiactionGroups`                          | yes      | Lists, which may be empty                                |
+| `smartActions`, `smartActionGroups`                          | no       | Lists                                                    |
+| `tags`, `description`, `author`, `base64Image`, `previewImg` | no       | Descriptive only                                         |
+
+### The layer
+
+`layer` has `id` (any integer; Input assigns the real one), `name`, `color` (a CSS hex
+color such as `"#22AAFF"`), optionally `os` (`0` or `1`, defaulting to macOS) and
+`layout`.
+
+The layout must have **exactly** the shape of the target device. Creator Micro V2 and
+Codex Micro currently use:
+
+- `base`: 4 rows of 2, 4, 4 and 3 keys
+- `encoders`: 1 row of 3 entries for the knob, in the order counter-clockwise, clockwise
+  and press
+- `joystick`: an object with a `type` and a list of `sectors`, where each sector is
+  `{ "k": keycode, "a1": startAngle, "a2": endAngle }`
+
+Each key is `{ "keycode": "..." }`.
+
+### Keycodes
+
+| Keycode        | Meaning                                                           |
+| -------------- | ----------------------------------------------------------------- |
+| `KC_NONE`      | Nothing                                                           |
+| `KC_…`         | A standard key or modifier, such as `KC_A`, `KC_ENT` or `KC_LGUI` |
+| `KI_…`, `KV_…` | Input and device-specific functions                               |
+| `KA_<id>`      | An Action from this definition's `actions`                        |
+| `KM_<id>`      | A Multiaction from this definition's `multiactions`               |
+| `SA_<id>`      | A Smart Action from this definition's `smartActions`              |
+
+Input rejects keycodes it doesn't know for the layer's operating system, and `KA_`,
+`KM_` or `SA_` references to IDs that the definition doesn't include. You can't refer
+to Actions that already exist on the device; include everything the layer needs.
+
+### Actions, Multiactions and Smart Actions
+
+**Action** (a macro):
+
+```json
+{
+    "id": 1,
+    "name": "Copy",
+    "color": "#FFAA00",
+    "icon": "optional",
+    "keyInputs": [{ "keycode": "KC_C", "delay": 0, "actionType": 2 }]
+}
+```
+
+Each key input has a `keycode`, a `delay` in milliseconds and an `actionType`: `0`
+release, `1` press or `2` click (press and release).
+
+**Multiaction** (a different result for tap, hold, double tap and tap-then-hold):
+
+```json
+{
+    "id": 1,
+    "name": "Play / Next",
+    "tap": { "keycode": "KC_MPLY", "delay": 0, "actionType": 1 },
+    "onHold": { "keycode": "KC_NONE", "delay": 0, "actionType": 1 },
+    "doubleTap": { "keycode": "KC_MNXT", "delay": 0, "actionType": 1 },
+    "tapHold": { "keycode": "KC_NONE", "delay": 0, "actionType": 1 },
+    "tappingTerms": 250
+}
+```
+
+`tappingTerms` is the time window in milliseconds that separates a tap from a hold.
+
+**Smart Action:**
+
+| `type`      | `payload`                      | What it does                      |
+| ----------- | ------------------------------ | --------------------------------- |
+| `API`       | `{ "id": "<identifier>" }`     | Sends `keyTriggered` to your apps |
+| `TEXT_STEP` | `{ "text": "Hello" }`          | Types the text                    |
+| `URL_STEP`  | `{ "url": "https://…" }`       | Opens the URL                     |
+| `APP_STEP`  | `{ "name": "…", "path": "…" }` | Opens the app                     |
+
+Command Smart Actions (`CMD_STEP`) are rejected for security reasons.
+
+### Groups
+
+Groups control how the new entries appear in Input's side panels:
+`{ "id": 1, "name": "Deploy tools", "actionIds": [1, 2] }`. A group can only list IDs
+defined in the same definition.
+
+### How IDs are handled
+
+IDs inside a definition only need to be unique within it. When the layer is added,
+Input:
+
+- gives new entries their own IDs and rewrites every reference to match
+- reuses existing entries that are identical instead of adding duplicates
+
+So you can install the same definition on several profiles without filling the device
+with duplicates.
+
+---
+
+## 7. Managing app access
+
+Open **Settings** in Input and choose **Manage external app permissions** to see every
+approved app, with its origin and when it was last used. Revoking an app removes its
+permission and immediately disconnects it. The next time it connects, it has to ask for
+approval again.
+
+---
+
+## 8. Troubleshooting
+
+| Problem                                          | What to check                                                                                                                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connection refused                               | Input isn't running, or something else is using port 19147.                                                                                       |
+| Connection rejected immediately                  | Use `127.0.0.1`, `[::1]` or `localhost` and the path `/input`. Native apps must not send an `Origin` header. Five apps may already be connected.  |
+| Connection closes after about 30 seconds         | You didn't authenticate in time, or the approval dialog took too long.                                                                            |
+| `-32001` on `authenticate`                       | The app was revoked, or the credentials came from a different origin. Delete them and authorize again.                                            |
+| `-32002` on `requestAuthorization`               | Another approval dialog is open, or there were more than three requests in the last minute. Wait and retry.                                       |
+| `getDevices` returns `[]`                        | No supported device is connected, or Input is still loading it. Wait for `devicesUpdated`.                                                        |
+| `-32004 Device not found`                        | The device reconnected and its ID changed. Call `getDevices` again.                                                                               |
+| No `keyTriggered` events                         | The key must be bound to an **API** Smart Action, and that layout must be saved to the device.                                                    |
+| `-32009` on `setKeyLighting`                     | No API Smart Action matches. Matching is case-sensitive, and regexes must match the whole identifier.                                             |
+| Lighting change accepted but not visible         | The key isn't on the active layer.                                                                                                                |
+| `-32602` on `addLayer`                           | Compare your layout's shape and keycodes with a layer exported from Input. Remove command Smart Actions. Check that groups only list defined IDs. |
+| `-32011` on `addLayer`                           | The profile already has six layers. Delete one in Input or choose another profile.                                                                |
+| Connection closed with code `1008` while sending | Over 30 requests in 10 seconds. Wait for each response before sending the next request.                                                           |
