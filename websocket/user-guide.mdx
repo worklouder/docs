@@ -111,7 +111,8 @@ If you can't browse, the reference below is enough on its own.
   - Events through `on`/`once`/`off`: `devicesUpdated`, `deviceInfoChanged`,
     `keyTriggered`, `disconnected`, `transportError`, `protocolError`, `notification`.
     It is not a Node.js EventEmitter, so don't use `events.once()`.
-  - Errors: `InputApiError` (has numeric `code`), `InputConnectionError`,
+  - Errors: `InputApiError` (has numeric `code`), `InputDeviceRateLimitError`
+    (subclass of `InputApiError` for `-32017`), `InputConnectionError`,
     `InputRequestTimeoutError`, `InputProtocolError`.
 - In any other language, speak JSON-RPC 2.0 over a plain WebSocket:
   - URL `ws://127.0.0.1:19147/input` (or `ws://[::1]:19147/input`). The port and path
@@ -212,8 +213,14 @@ If you can't browse, the reference below is enough on its own.
 
 ## Limits
 
-- 5 open connections, 30 requests per 10 seconds per connection, 512 KiB per message.
-  Going over closes the connection, so send one request at a time.
+- 5 open connections, 65 requests per 10 seconds per connection, 512 KiB per message.
+  Going over closes the connection, so send one request at a time. Every request
+  counts, including `requestAuthorization` and `authenticate`.
+- `setActiveProfileLayer`, `setKeyLighting` and `addLayer` also share a per-device
+  budget: 60 requests per 10 seconds for a USB device and 40 for a BLE device
+  (`isUsbConnection` in `getDeviceInfo`). All connected apps share it. Going over fails
+  the request with `-32017` but keeps the connection open. Space these requests at
+  least 250 ms apart per device.
 - 3 authorization requests per minute, and only one approval dialog at a time.
 
 ## Error codes
@@ -225,7 +232,8 @@ authorization denied; -32004 device not found; -32005 device disconnected; -3200
 device model unsupported; -32007 lighting unavailable; -32008 device not ready; -32009
 identifier not found; -32010 profile not found; -32011 layer limit reached; -32013
 configuration write failed; -32014 another configuration write in progress; -32015
-layer not found; -32016 device rejected the profile/layer change.
+layer not found; -32016 device rejected the profile/layer change; -32017 device rate
+limit exceeded (safe to retry after a short wait).
 
 ## Requirements for your code
 
@@ -234,6 +242,7 @@ layer not found; -32016 device rejected the profile/layer change.
 - Reconnect after disconnects, re-authenticate with the stored credentials and fetch
   the device list again.
 - Wait for responses instead of firing many requests at once.
+- On `-32017`, wait at least 250 ms and retry, backing off if it repeats.
 - Keep the token out of logs, source control and plain-text files where possible.
 - Explain to me how to run the result, what to approve in Input on the first run, and
   which layer you installed.
@@ -393,8 +402,13 @@ input.on('deviceInfoChanged', ({ deviceId, deviceInfo }) => {
 
 ### Good to know
 
-- **Requests are queued.** InputKit sends one request at a time, at least 400 ms apart,
-  so you can `await` calls freely without hitting the rate limit.
+- **Requests are queued.** InputKit sends one request at a time, at least 160 ms apart,
+  so you can `await` calls freely without hitting the connection's rate limit.
+- **Device writes are paced.** InputKit spaces `setActiveProfileLayer`,
+  `setKeyLighting` and `addLayer` at least 250 ms apart for each device. Other apps
+  share the device's budget, so a write can still fail with
+  `InputDeviceRateLimitError`. It's safe to retry after a short wait; InputKit doesn't
+  retry for you.
 - **Timeouts:** 10 seconds for most requests, 120 seconds for `addLayer` and 29 seconds
   for `requestAuthorization`. A timed-out request may still have succeeded, and
   InputKit never retries on its own.
@@ -571,7 +585,7 @@ Switches profile and layer in one step.
   `profileIndex` starts at 0 and `layerIndex` starts at 1.
 - **Result:** `{ changed: true }`
 - **Errors:** `-32010` profile not found, `-32015` layer not found, `-32016` the device
-  rejected the change.
+  rejected the change, `-32017` the device's rate limit was exceeded.
 
 The `deviceInfoChanged` event that follows is the authoritative confirmation.
 
@@ -610,6 +624,8 @@ Matching rules:
   example, `vol.*` matches `volume-up` and `volume-down`, while `vol` matches only an
   identifier that is exactly `vol`.
 - If nothing matches, the request fails with `-32009`.
+
+Each request counts toward the device's rate limit, even when it fails with `-32009`.
 
 Success means the device accepted the change. You'll only see it if the key is on the
 active layer.
@@ -654,6 +670,7 @@ Common errors:
 | `-32011` | The profile already has six layers                                                                                                                          |
 | `-32013` | Saving to the device failed                                                                                                                                 |
 | `-32014` | Another configuration change for this device is in progress                                                                                                 |
+| `-32017` | The device's rate limit was exceeded                                                                                                                        |
 
 The definition format is described in [section 6](#6-layer-definitions-for-addlayer).
 
@@ -673,14 +690,28 @@ current level.
 
 ### Limits
 
-| Limit                  | Value                            | What happens when exceeded   |
-| ---------------------- | -------------------------------- | ---------------------------- |
-| Open connections       | 5                                | New connections are rejected |
-| Requests               | 30 per 10 seconds per connection | Connection closed (`1008`)   |
-| Message size           | 512 KiB                          | Connection closed (`1009`)   |
-| Time to authenticate   | 30 seconds after connecting      | Connection closed (`1008`)   |
-| Authorization requests | 3 per minute, across all apps    | `-32002`                     |
-| Approval dialogs       | One at a time                    | `-32002`                     |
+| Limit                  | Value                                                  | What happens when exceeded   |
+| ---------------------- | ------------------------------------------------------ | ---------------------------- |
+| Open connections       | 5                                                      | New connections are rejected |
+| Requests               | 65 per 10 seconds per connection                       | Connection closed (`1008`)   |
+| Device writes          | 60 (USB) or 40 (BLE) per 10 seconds per device         | `-32017`                     |
+| Message size           | 512 KiB                                                | Connection closed (`1009`)   |
+| Time to authenticate   | 30 seconds after connecting                            | Connection closed (`1008`)   |
+| Authorization requests | 3 per minute, across all apps                          | `-32002`                     |
+| Approval dialogs       | One at a time                                          | `-32002`                     |
+
+Both request limits use a rolling 10-second window. Every request counts toward the
+connection limit, including `requestAuthorization` and `authenticate`.
+
+Device writes are `setActiveProfileLayer`, `setKeyLighting` and `addLayer`. They share
+one budget per device across every connected app, so another app can use part of
+yours. `getDevices` and `getDeviceInfo` don't count. A request that reaches the device
+and then fails, for example with `-32009` or `-32015`, still counts. Check
+`isUsbConnection` in `getDeviceInfo` to see which limit applies.
+
+When a device write fails with `-32017`, the connection stays open and you can retry.
+Wait at least 250 ms and back off if it happens again. Retries also count toward the
+connection limit.
 
 ### Error codes
 
@@ -706,6 +737,7 @@ current level.
 | `-32014` | Another configuration change for the device is in progress  |
 | `-32015` | Layer not found                                             |
 | `-32016` | The device rejected the profile and layer change            |
+| `-32017` | The device's rate limit was exceeded                        |
 
 ### WebSocket close codes
 
@@ -931,4 +963,5 @@ approval again.
 | Lighting change accepted but not visible         | The key isn't on the active layer.                                                                                                                |
 | `-32602` on `addLayer`                           | Compare your layout's shape and keycodes with a layer exported from Input. Remove command Smart Actions. Check that groups only list defined IDs. |
 | `-32011` on `addLayer`                           | The profile already has six layers. Delete one in Input or choose another profile.                                                                |
-| Connection closed with code `1008` while sending | Over 30 requests in 10 seconds. Wait for each response before sending the next request.                                                           |
+| Connection closed with code `1008` while sending | Over 65 requests in 10 seconds. Wait for each response before sending the next request.                                                           |
+| `-32017` on a device write                       | Too many profile, lighting or layer changes for that device, possibly from other apps too. Space them at least 250 ms apart and retry with backoff. |
