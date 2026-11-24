@@ -4,15 +4,15 @@ Developer documentation for Work Louder devices and the Input app, built with [M
 
 ## Contents
 
-| Page                                      | Description                                        |
-| ----------------------------------------- | -------------------------------------------------- |
-| [WebSocket API](websocket/user-guide.mdx) | Control your device from your own scripts and apps |
+| Page                                  | Description                                                     |
+| ------------------------------------- | --------------------------------------------------------------- |
+| [InputKit](input-kit/user-guide.mdx)  | Control your device from your own scripts and apps over WebSocket |
 
 ## Project structure
 
 ```
 docs.json                  Site configuration: name, colors, logo and navigation
-websocket/user-guide.mdx   WebSocket API guide
+input-kit/user-guide.mdx   InputKit guide (Input's WebSocket API)
 logo/                      Light and dark mode logos
 favicon.png                Browser tab icon
 ```

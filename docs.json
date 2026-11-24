@@ -18,11 +18,17 @@
       {
         "group": "Developers",
         "pages": [
-          "websocket/user-guide"
+          "input-kit/user-guide"
         ]
       }
     ]
   },
+  "redirects": [
+    {
+      "source": "/websocket/user-guide",
+      "destination": "/input-kit/user-guide"
+    }
+  ],
   "contextual": {
     "options": [
       "copy",
