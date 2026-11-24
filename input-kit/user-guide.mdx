@@ -1,10 +1,11 @@
 ---
-title: "WebSocket API"
-description: "Control your Work Louder device from your own scripts and apps"
+title: "InputKit"
+description: "Control your Work Louder device from your own scripts and apps over a local WebSocket API"
 ---
 
-Input includes a local WebSocket API that lets your own scripts and apps talk to your
-Work Louder device while Input is running. With it you can:
+InputKit lets your own scripts and apps talk to your Work Louder device while Input is
+running. It's a local WebSocket API built into Input, with an official JavaScript and
+TypeScript client library, `@worklouder/input-kit`. With it you can:
 
 - **react to key presses**: run your own code when you press a key on the device
 - **change key lighting**: set the color, brightness and effect of specific keys
@@ -38,7 +39,7 @@ Before you run what the agent builds:
 
 ````text
 You are helping me build an integration with Work Louder Input, a desktop app that
-manages my Work Louder macropad. Input exposes a local WebSocket API. Build the
+manages my Work Louder macropad. Input exposes InputKit, a local WebSocket API. Build the
 integration described under "What I want to build" using the reference below. Ask me
 before guessing anything that isn't covered here.
 
@@ -328,7 +329,7 @@ There are two ways to get them onto your device:
 
 ---
 
-## 4. Using InputKit (JavaScript and TypeScript)
+## 4. Using the InputKit library (JavaScript and TypeScript)
 
 [`@worklouder/input-kit`](https://www.npmjs.com/package/@worklouder/input-kit) is the
 official client library. It has no dependencies, ships ESM and CommonJS builds with
@@ -466,10 +467,11 @@ Both follow the pattern recommended in this guide:
 
 ---
 
-## 5. Protocol reference (any language)
+## 5. WebSocket protocol reference (any language)
 
-Use this section if you're not using JavaScript, or want to understand what InputKit
-does for you.
+Use this section if you're not using JavaScript, or want to understand what the
+InputKit library does for you. InputKit speaks JSON-RPC 2.0 over a plain WebSocket, so
+any language with a WebSocket client can use it.
 
 ### Connecting
 
