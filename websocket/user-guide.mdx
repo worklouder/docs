@@ -114,6 +114,10 @@ If you can't browse, the reference below is enough on its own.
   - Errors: `InputApiError` (has numeric `code`), `InputDeviceRateLimitError`
     (subclass of `InputApiError` for `-32017`), `InputConnectionError`,
     `InputRequestTimeoutError`, `InputProtocolError`.
+  - `LayerDefinition` and its parts (`LayerDefinitionLayer`, `LayerLights`,
+    `SideLighting`, `LayerAction`, `LayerSmartAction` and so on) are exported as
+    types. `addLayer` checks the definition before sending and throws a `TypeError`
+    or `RangeError` that names the invalid field.
 - In any other language, speak JSON-RPC 2.0 over a plain WebSocket:
   - URL `ws://127.0.0.1:19147/input` (or `ws://[::1]:19147/input`). The port and path
     are fixed. Only loopback hosts are accepted.
@@ -166,7 +170,11 @@ If you can't browse, the reference below is enough on its own.
 - `addLayer { deviceId, profileIndex (0-based), definition }` -> `{ added: true }`.
   Adds a new layer to an existing profile. A profile holds at most 6 layers. The
   definition format is described below. It doesn't change the active layer; call
-  `setActiveProfileLayer` afterwards if needed.
+  `setActiveProfileLayer` afterwards if needed. If the device is open in Input's main
+  window, the window adds the layer to its current configuration (including unsaved
+  edits) and `{ added: true }` means the window has it; the window then saves it to the
+  device after its usual countdown. If the window doesn't answer within 5 seconds the
+  request fails with `-32013`.
 
 ## Events (every authenticated client receives all of them; no subscription needed)
 
@@ -190,7 +198,15 @@ If you can't browse, the reference below is enough on its own.
 }
 ```
 
-- `os` and `layer.os`: 0 = macOS, 1 = Windows.
+- `os` and `layer.os`: 0 = macOS, 1 = Windows. `layer.os` is optional and defaults to
+  macOS.
+- `layer.lights` (optional) sets the new layer's lighting:
+  `{ "backlight"?: side, "underglow"?: side }` with at least one side, where a side is
+  `{ "effect", "color"?, "brightness"?, "speed"?, "magic"? }`. `effect` is 0 off,
+  1 solid, 2 snake, 3 rainbow, 4 breath, 5 gradient (6 is not allowed here). `color` is
+  an integer 0xRRGGBB; `brightness`, `speed` and `magic` are 0 to 1. Unknown fields are
+  rejected. Omit `lights` to copy the lighting of the profile's last layer; a side you
+  leave out uses the device default.
 - Each key is `{ "keycode": "..." }`. The layout must have exactly the device's shape.
   For Creator Micro V2 and Codex Micro that is 4 `base` rows of 2, 4, 4 and 3 keys,
   1 `encoders` row of 3 entries (counter-clockwise, clockwise, press) and a `joystick`
@@ -226,7 +242,7 @@ If you can't browse, the reference below is enough on its own.
 ## Error codes
 
 -32700 invalid JSON; -32600 invalid request; -32601 unknown method; -32602 invalid
-params, layer definition or regex; -32603 internal error; -32001 authentication
+params, layer definition, lighting or regex; -32603 internal error; -32001 authentication
 required or failed; -32002 authorization in progress or unavailable; -32003
 authorization denied; -32004 device not found; -32005 device disconnected; -32006
 device model unsupported; -32007 lighting unavailable; -32008 device not ready; -32009
@@ -409,6 +425,13 @@ input.on('deviceInfoChanged', ({ deviceId, deviceInfo }) => {
   share the device's budget, so a write can still fail with
   `InputDeviceRateLimitError`. It's safe to retry after a short wait; InputKit doesn't
   retry for you.
+- **Layer definitions are typed and checked.** `LayerDefinition` and all of its parts,
+  such as `LayerDefinitionLayer`, `LayerLights` and `LayerSmartAction`, are exported
+  as types. Before sending, `addLayer` checks the definition and throws a `TypeError`
+  or `RangeError` that names the invalid field, for example
+  `definition.layer.layout.base[0][1].keycode must be a string`. Input still checks
+  what InputKit can't, such as the device's key layout and unknown keycodes.
+  Definitions loaded from JSON files stay assignable.
 - **Timeouts:** 10 seconds for most requests, 120 seconds for `addLayer` and 29 seconds
   for `requestAuthorization`. A timed-out request may still have succeeded, and
   InputKit never retries on its own.
@@ -658,19 +681,32 @@ an existing profile.
 - **Result:** `{ added: true }`
 
 The new layer becomes the profile's last layer. The active layer doesn't change; call
-`setActiveProfileLayer` to switch to it. Input saves the change to the device and checks
-it, which can take a while, so allow up to about two minutes.
+`setActiveProfileLayer` to switch to it.
+
+What `{ added: true }` means depends on whether the device is open in Input's main
+window:
+
+- **Device not open in the window:** Input adds the layer to the configuration last
+  saved to the device, saves it and checks it. The result arrives once the device has
+  the layer, which can take a while, so allow up to about two minutes.
+- **Device open in the window:** the window adds the layer to its current
+  configuration, including changes the user hasn't saved yet, and saves it like any
+  other edit, after the usual countdown. The result arrives as soon as the window has
+  the layer, before it reaches the device. If that save fails, Input shows the error to
+  the user and lets them retry; your app isn't told. The profile and six-layer checks
+  apply to the window's configuration, and the request fails with `-32013` if the
+  window doesn't answer within 5 seconds.
 
 Common errors:
 
-| Code     | Cause                                                                                                                                                       |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-32602` | The definition is malformed, doesn't match the device's layout, uses unknown keycodes, has groups listing undefined IDs, or contains a command Smart Action |
-| `-32010` | The profile doesn't exist                                                                                                                                   |
-| `-32011` | The profile already has six layers                                                                                                                          |
-| `-32013` | Saving to the device failed                                                                                                                                 |
-| `-32014` | Another configuration change for this device is in progress                                                                                                 |
-| `-32017` | The device's rate limit was exceeded                                                                                                                        |
+| Code     | Cause                                                                                                                                                                                                  |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `-32602` | The definition is malformed, doesn't match the device's layout, uses unknown keycodes, has groups listing undefined IDs, contains a command Smart Action, or has invalid or unsupported layer lighting |
+| `-32010` | The profile doesn't exist                                                                                                                                                                              |
+| `-32011` | The profile already has six layers                                                                                                                                                                     |
+| `-32013` | Saving to the device failed, or Input's window didn't answer within 5 seconds                                                                                                                          |
+| `-32014` | Another configuration change for this device is in progress                                                                                                                                            |
+| `-32017` | The device's rate limit was exceeded                                                                                                                                                                   |
 
 The definition format is described in [section 6](#6-layer-definitions-for-addlayer).
 
@@ -720,7 +756,7 @@ connection limit.
 | `-32700` | The message is not valid JSON                               |
 | `-32600` | Not a valid JSON-RPC request, or wrong authentication state |
 | `-32601` | Unknown method                                              |
-| `-32602` | Invalid parameters, layer definition or regex               |
+| `-32602` | Invalid parameters, layer definition, lighting or regex     |
 | `-32603` | Internal error in Input                                     |
 | `-32001` | Authentication required, or the credentials are invalid     |
 | `-32002` | An authorization is in progress or temporarily unavailable  |
@@ -779,6 +815,9 @@ described below, and you have a definition.
         "name": "Deploy tools",
         "color": "#22AAFF",
         "os": 0,
+        "lights": {
+            "backlight": { "effect": 1, "color": 2271999, "brightness": 0.8 }
+        },
         "layout": {
             "base": [
                 [{ "keycode": "SA_1" }, { "keycode": "SA_2" }],
@@ -826,7 +865,8 @@ described below, and you have a definition.
 ```
 
 This installs a layer whose first two keys send `keyTriggered` with the identifiers
-`deploy` and `rollback`, and whose third key presses ⌘C.
+`deploy` and `rollback`, and whose third key presses ⌘C. Its backlight is solid
+`#22AAFF` (`2271999`), and its underglow uses the device default.
 
 ### Top-level fields
 
@@ -846,8 +886,8 @@ This installs a layer whose first two keys send `keyTriggered` with the identifi
 ### The layer
 
 `layer` has `id` (any integer; Input assigns the real one), `name`, `color` (a CSS hex
-color such as `"#22AAFF"`), optionally `os` (`0` or `1`, defaulting to macOS) and
-`layout`.
+color such as `"#22AAFF"`), `layout`, and optionally `os` (`0` or `1`, defaulting to
+macOS) and `lights` (see [Layer lighting](#layer-lighting)).
 
 The layout must have **exactly** the shape of the target device. Creator Micro V2 and
 Codex Micro currently use:
@@ -859,6 +899,46 @@ Codex Micro currently use:
   `{ "k": keycode, "a1": startAngle, "a2": endAngle }`
 
 Each key is `{ "keycode": "..." }`.
+
+### Layer lighting
+
+`layer.lights` optionally sets the backlight and underglow of the new layer. It uses
+the same numeric conventions as `setKeyLighting`.
+
+```json
+"lights": {
+    "backlight": { "effect": 1, "color": 16711680, "brightness": 0.6 },
+    "underglow": { "effect": 3, "speed": 0.3 }
+}
+```
+
+Each side is an object with these fields:
+
+| Field        | Required | Description                                                                          |
+| ------------ | -------- | ------------------------------------------------------------------------------------ |
+| `effect`     | yes      | `0` off, `1` solid, `2` snake, `3` rainbow, `4` breath, `5` gradient                 |
+| `color`      | no       | RGB as an integer, `0x000000` to `0xFFFFFF`                                          |
+| `brightness` | no       | `0` to `1`                                                                           |
+| `speed`      | no       | `0` to `1`                                                                           |
+| `magic`      | no       | `0` to `1`                                                                           |
+
+Rules:
+
+- `lights` must contain at least one side, and each side must contain `effect`.
+- Unknown fields are rejected.
+- Effect `6` (shallow breath) is only available to `setKeyLighting`.
+
+Defaults:
+
+- When you omit `lights`, the new layer copies the lighting of the profile's last
+  layer, or uses the device defaults when that layer has none.
+- When you send only one side, the other side uses the device default.
+- Input fills unset fields the same way its lighting editor does. `color` defaults to
+  `0xFFFFFF` and `brightness` to `0.5`, unless the effect is off. `speed` and `magic`
+  default to `0.5`, unless the effect is off or solid.
+
+Invalid lighting fails with `-32602`. Devices without lighting also reject `lights`
+with `-32602`, so omit it for those devices.
 
 ### Keycodes
 
@@ -961,7 +1041,9 @@ approval again.
 | No `keyTriggered` events                         | The key must be bound to an **API** Smart Action, and that layout must be saved to the device.                                                    |
 | `-32009` on `setKeyLighting`                     | No API Smart Action matches. Matching is case-sensitive, and regexes must match the whole identifier.                                             |
 | Lighting change accepted but not visible         | The key isn't on the active layer.                                                                                                                |
-| `-32602` on `addLayer`                           | Compare your layout's shape and keycodes with a layer exported from Input. Remove command Smart Actions. Check that groups only list defined IDs. |
+| `-32602` on `addLayer`                           | Compare your layout's shape and keycodes with a layer exported from Input. Remove command Smart Actions. Check that groups only list defined IDs. Check `layer.lights`: every side needs an `effect` from `0` to `5`, and unknown fields are rejected. |
+| `addLayer` succeeded but the layer isn't on the device yet | The device is open in Input's main window. The window saves the new layer after its usual countdown, and shows any save error there.     |
+| `-32013` on `addLayer`                           | Saving to the device failed, or Input's window didn't answer within 5 seconds. Retry, or close the device in Input's window.                     |
 | `-32011` on `addLayer`                           | The profile already has six layers. Delete one in Input or choose another profile.                                                                |
 | Connection closed with code `1008` while sending | Over 65 requests in 10 seconds. Wait for each response before sending the next request.                                                           |
 | `-32017` on a device write                       | Too many profile, lighting or layer changes for that device, possibly from other apps too. Space them at least 250 ms apart and retry with backoff. |
